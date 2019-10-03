@@ -279,7 +279,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "fping_exporter"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hashbrown 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ipnet 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",

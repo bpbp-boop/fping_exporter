@@ -1,20 +1,17 @@
 use prometheus_exporter_base::{render_prometheus, MetricType, PrometheusMetric};
 use regex::Regex;
-use std::fs;
 use std::process::Command;
 
 use hashbrown::HashMap;
-use serde_derive::Deserialize;
 use structopt::StructOpt;
-use structopt_toml::StructOptToml;
 
 use ipnet::IpNet;
 use std::net::IpAddr;
 
 use snafu::{OptionExt, ResultExt, Snafu};
+use percent_encoding::percent_decode_str;
 
-#[derive(Clone, Debug, Deserialize, StructOpt, StructOptToml)]
-#[serde(default)]
+#[derive(StructOpt, Debug)]
 #[structopt(name = "fping_exporter")]
 struct Opt {
     /// Address to listen on for web interface and telemetry.
@@ -164,9 +161,7 @@ fn process_subnet(target_subnet: IpNet) -> Result<Vec<PingResult>> {
 }
 
 fn main() -> Result<()> {
-    // get targets from either config file or command line
-    let config = fs::read_to_string("fping.toml").unwrap();
-    let options = Opt::from_args_with_toml(&config).expect("toml parse failed");
+    let options = Opt::from_args();
 
     let web_addr = options
         .web_listen_addr
@@ -181,28 +176,22 @@ fn main() -> Result<()> {
 
             let mut query_string = HashMap::new();
             if request.uri().query().is_some() {
-                let pairs = request.uri().query().unwrap().split("&");
+                let query_decoded = percent_decode_str(request.uri().query().unwrap()).decode_utf8_lossy();
+                let pairs = query_decoded.split("&");
                 for p in pairs {
                     let mut sp = p.splitn(2, '=');
                     let (k, v) = (sp.next().unwrap(), sp.next().unwrap());
-                    query_string.insert(k, v);
+                    query_string.insert(k.to_owned(), v.to_owned());
                 }
             }
 
             println!("{:?}", query_string);
 
-            // for target_subnet in options.targets.clone() {
-            //     let mut subnet_result = process_subnet(target_subnet)?;
-            //     subnet_results.append(&mut subnet_result);
-            // }
-
             let target: IpNet = query_string.get("target").unwrap().parse().unwrap();
-
             let subnet_results = process_subnet(target)?;
 
-            let mut output_string = String::new();
-
             // make output
+            let mut output_string = String::new();
             // measurements (min, avg max)
             let ping_rtt = PrometheusMetric::new(
                 "ping_rtt_seconds",

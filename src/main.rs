@@ -1,133 +1,262 @@
 use prometheus_exporter_base::{render_prometheus, MetricType, PrometheusMetric};
-use std::thread;
-use std::time::Duration;
-use std::process::Command;
 use regex::Regex;
-use std::path::PathBuf;
 use std::fs;
-
-use std::sync::{Arc, Mutex};
+use std::process::Command;
 
 use hashbrown::HashMap;
+use serde_derive::Deserialize;
 use structopt::StructOpt;
 use structopt_toml::StructOptToml;
-use serde_derive::Deserialize;
 
-#[derive(Debug, Clone, Default)]
-struct Targets {}
+use ipnet::IpNet;
+use std::net::IpAddr;
+
+use snafu::{OptionExt, ResultExt, Snafu};
 
 #[derive(Clone, Debug, Deserialize, StructOpt, StructOptToml)]
 #[serde(default)]
 #[structopt(name = "fping_exporter")]
 struct Opt {
     /// Address to listen on for web interface and telemetry.
-    #[structopt(long = "listen-address", default_value = "0.0.0.0:9115")]
+    #[structopt(long = "listen-address", default_value = "0.0.0.0:9215")]
     web_listen_addr: String,
 
-    #[structopt(long = "targets")]
-    targets: Vec<String>,
+    // #[structopt(long = "targets")]
+    // targets: Vec<IpNet>,
 }
 
-fn main() {
+#[derive(Debug)]
+struct PingResult {
+    ip_address: IpAddr,
+    sent: u8,
+    received: u8,
+    lost: u8,
+    minimum: Option<f64>,
+    average: Option<f64>,
+    maxiumum: Option<f64>,
+}
+
+#[derive(Debug, Snafu)]
+enum ExporterError {
+    #[snafu(display("Unable to parse fping output"))]
+    ParseError,
+
+    #[snafu(display("Unable to find `{}` field in fping output", name))]
+    MissingField { name: String },
+
+    #[snafu(display("Error running fping"))]
+    CommandError { source: std::io::Error },
+
+    #[snafu(display("Error parsing IP Address: {}", ip_address_output))]
+    IpAddressError {
+        ip_address_output: String,
+        source: std::net::AddrParseError,
+    },
+
+    #[snafu(display("Unable to parse fping output"))]
+    ParseIntError { source: std::num::ParseIntError },
+
+    #[snafu(display("Unable to parse fping output"))]
+    ParseFloatError { source: std::num::ParseFloatError },
+}
+
+type Result<T, E = ExporterError> = std::result::Result<T, E>;
+
+fn process_subnet(target_subnet: IpNet) -> Result<Vec<PingResult>> {
+    let subnet_string = format!("{:?}", target_subnet);
+    let output = Command::new("/usr/local/sbin/fping")
+        .args(&["-q", "-r", "0", "-c", "5", "-g", &subnet_string])
+        .output()
+        .context(CommandError)?;
+
+    let stderr = output.clone().stderr;
+    let output = String::from_utf8_lossy(&stderr);
+
+    let mut results = vec![];
+
+    let re = Regex::new(r"(?P<ip_address>.*) :.*= (?P<sent>\d+)/(?P<received>\d+)/(?P<lost>\d+)%(?:,.*= (?P<min>\d+\.?\d*)/(?P<avg>\d+\.?\d*)/(?P<max>\d+\.?\d*))?").unwrap();
+    for ping_result in output.lines() {
+        let caps = re.captures(&ping_result).ok_or(ExporterError::ParseError)?;
+
+        let ip_address_output = caps
+            .name("ip_address")
+            .context(MissingField {
+                name: "ip_address".to_string(),
+            })?
+            .as_str()
+            .trim();
+
+        let ip_address: IpAddr = ip_address_output
+            .parse()
+            .context(IpAddressError { ip_address_output })?;
+
+        let sent_output = caps
+            .name("sent")
+            .context(MissingField {
+                name: "sent".to_string(),
+            })?
+            .as_str();
+        let sent: u8 = sent_output.parse().context(ParseIntError)?;
+
+        let received_output = caps
+            .name("received")
+            .context(MissingField {
+                name: "received".to_string(),
+            })?
+            .as_str();
+        let received: u8 = received_output.parse().context(ParseIntError)?;
+
+        let lost_output = caps
+            .name("lost")
+            .context(MissingField {
+                name: "lost".to_string(),
+            })?
+            .as_str();
+        let lost: u8 = lost_output.parse().context(ParseIntError)?;
+
+        let mut minimum = None;
+        let mut average = None;
+        let mut maxiumum = None;
+
+        if caps.name("min").is_some() {
+            let min_ms: f64 = caps
+                .name("min")
+                .context(MissingField {
+                    name: "min".to_string(),
+                })?
+                .as_str()
+                .parse()
+                .context(ParseFloatError)?;
+            let avg_ms: f64 = caps
+                .name("avg")
+                .context(MissingField {
+                    name: "avg".to_string(),
+                })?
+                .as_str()
+                .parse()
+                .context(ParseFloatError)?;
+            let max_ms: f64 = caps
+                .name("max")
+                .context(MissingField {
+                    name: "max".to_string(),
+                })?
+                .as_str()
+                .parse()
+                .context(ParseFloatError)?;
+
+            minimum = Some(min_ms / 1000.0);
+            average = Some(avg_ms / 1000.0);
+            maxiumum = Some(max_ms / 1000.0);
+        }
+
+        results.push(PingResult {
+            ip_address,
+            sent,
+            received,
+            lost,
+            minimum,
+            average,
+            maxiumum,
+        })
+    }
+
+    Ok(results)
+}
+
+fn main() -> Result<()> {
     // get targets from either config file or command line
     let config = fs::read_to_string("fping.toml").unwrap();
     let options = Opt::from_args_with_toml(&config).expect("toml parse failed");
 
-    let web_addr = options.web_listen_addr.parse().expect("can not parse listen addr");
+    let web_addr = options
+        .web_listen_addr
+        .parse()
+        .expect("can not parse listen addr");
+
     println!("starting exporter on {}", web_addr);
 
-    render_prometheus(web_addr, options, |request, options| {
+    render_prometheus(web_addr, options, |request, _options| {
         async move {
-            println!("{:?} {:?}", request.headers(), request.uri());
+            println!("{:?}", request.uri());
 
-            let mut command_results = vec![];
-            for target_subnet in options.targets.clone() {
-                let output = Command::new("/usr/local/sbin/fping")
-                    .args(&["-q", "-r", "0", "-c", "5", "-g", &target_subnet])
-                    .output()
-                    .expect("failed to execute process");
-
-                let stderr = output.clone().stderr;
-                let output = String::from_utf8_lossy(&stderr);
-
-                for line in output.lines() {
-                    command_results.push(line.to_owned());
+            let mut query_string = HashMap::new();
+            if request.uri().query().is_some() {
+                let pairs = request.uri().query().unwrap().split("&");
+                for p in pairs {
+                    let mut sp = p.splitn(2, '=');
+                    let (k, v) = (sp.next().unwrap(), sp.next().unwrap());
+                    query_string.insert(k, v);
                 }
             }
+
+            println!("{:?}", query_string);
+
+            // for target_subnet in options.targets.clone() {
+            //     let mut subnet_result = process_subnet(target_subnet)?;
+            //     subnet_results.append(&mut subnet_result);
+            // }
+
+            let target: IpNet = query_string.get("target").unwrap().parse().unwrap();
+
+            let subnet_results = process_subnet(target)?;
 
             let mut output_string = String::new();
-            let mut measurements = HashMap::new();
-            let mut packet_stats = HashMap::new();
-            let mut packet_losses = HashMap::new();
-
-            // Parse the fping output (tested on version 4.2)
-            // example ping "8.8.8.8 : xmt/rcv/%loss = 10/10/0%, min/avg/max = 0.72/0.82/1.42"
-            // example loss "192.1.1.1 : xmt/rcv/%loss = 10/0/100%"
-            // https://www.debuggex.com/r/T5_Da8_kWGHpm8y1
-            let re = Regex::new(r"(?P<ip_address>.*) :.*= (?P<sent>\d+)/(?P<received>\d+)/(?P<lost>\d+)%(?:,.*= (?P<min>\d+\.?\d*)/(?P<avg>\d+\.?\d*)/(?P<max>\d+\.?\d*))?").unwrap();
-
-            for ping_result in command_results {
-                let caps = re.captures(&ping_result).unwrap();
-
-                let ip_address = caps.name("ip_address").unwrap().as_str();
-
-                let sent: u8 = caps.name("sent").unwrap().as_str().parse().unwrap();
-                let received: u8 = caps.name("received").unwrap().as_str().parse().unwrap();
-                let lost: u8 = caps.name("lost").unwrap().as_str().parse().unwrap();
-
-                packet_stats.insert(ip_address.to_owned(), (sent, received));
-                packet_losses.insert(ip_address.to_owned(), lost);
-
-                if caps.name("min").is_some() {
-                    let min: f32 = caps.name("min").unwrap().as_str().parse().unwrap();
-                    let avg: f32 = caps.name("avg").unwrap().as_str().parse().unwrap();
-                    let max: f32 = caps.name("max").unwrap().as_str().parse().unwrap();
-
-                    measurements.insert(ip_address.to_owned(), (min / 1000f32, avg / 1000f32, max / 1000f32));
-                }
-            }
 
             // make output
             // measurements (min, avg max)
-            let ping_rtt = PrometheusMetric::new("ping_rtt_seconds", MetricType::Gauge, "Ping round trip time in seconds");
+            let ping_rtt = PrometheusMetric::new(
+                "ping_rtt_seconds",
+                MetricType::Gauge,
+                "Ping round trip time in seconds",
+            );
+
             output_string.push_str(&ping_rtt.render_header());
-            for (ip_address, (min, avg, max)) in &measurements {
+
+            for result in &subnet_results {
+                if result.minimum.is_none() {
+                    continue;
+                }
+                let ip = result.ip_address.to_owned().to_string();
+
                 let mut attributes = Vec::new();
-                attributes.push(("address", &ip_address[..]));
+                attributes.push(("address", &ip[..]));
                 attributes.push(("sample", "minimum"));
-                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), *min));
+                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), result.minimum.unwrap()));
 
-                let mut attributes = Vec::new();
-                attributes.push(("address", &ip_address[..]));
+                attributes = Vec::new();
+                attributes.push(("address", &ip[..]));
                 attributes.push(("sample", "average"));
-                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), *avg));
+                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), result.average.unwrap()));
 
-                let mut attributes = Vec::new();
-                attributes.push(("address", &ip_address[..]));
-                attributes.push(("sample", "maximum"));
-                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), *max));
+                attributes = Vec::new();
+                attributes.push(("address", &ip[..]));
+                attributes.push(("sample", "maxiumum"));
+                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), result.maxiumum.unwrap()));
             }
 
             output_string.push_str("\n\n");
 
+            // packets sent/received
             let ping_packets_sent = PrometheusMetric::new("ping_packets_sent", MetricType::Gauge, "Ping packets sent");
             output_string.push_str(&ping_packets_sent.render_header());
 
-            // packets sent/received
-            for (ip_address, (sent, _receieved)) in &packet_stats {
+            for result in &subnet_results {
+                let ip = result.ip_address.to_owned().to_string();
                 let mut attributes = Vec::new();
-                attributes.push(("address", &ip_address[..]));
-                output_string.push_str(&ping_packets_sent.render_sample(Some(&attributes), *sent));
+                attributes.push(("address", &ip[..]));
+                output_string.push_str(&ping_packets_sent.render_sample(Some(&attributes), result.sent));
             }
 
             output_string.push_str("\n\n");
-            let ping_packets_received = PrometheusMetric::new("ping_packets_received", MetricType::Gauge, "Ping packets receieved");
+
+            let ping_packets_received = PrometheusMetric::new("ping_packets_received", MetricType::Gauge, "Ping packets received");
             output_string.push_str(&ping_packets_received.render_header());
 
-            for (ip_address, (_sent, receieved)) in &packet_stats {
+            for result in &subnet_results {
+                let ip = result.ip_address.to_owned().to_string();
                 let mut attributes = Vec::new();
-                attributes.push(("address", &ip_address[..]));
-                output_string.push_str(&ping_packets_received.render_sample(Some(&attributes), *receieved));
+                attributes.push(("address", &ip[..]));
+                output_string.push_str(&ping_packets_received.render_sample(Some(&attributes), result.received));
             }
 
             output_string.push_str("\n\n");
@@ -136,13 +265,16 @@ fn main() {
             let ping_packet_loss = PrometheusMetric::new("ping_packet_loss_percent", MetricType::Gauge, "Percent of ping packets lost");
             output_string.push_str(&ping_packet_loss.render_header());
 
-            for (ip_address, lost) in &packet_losses {
+            for result in &subnet_results {
+                let ip = result.ip_address.to_owned().to_string();
                 let mut attributes = Vec::new();
-                attributes.push(("address", &ip_address[..]));
-                output_string.push_str(&ping_packet_loss.render_sample(Some(&attributes), *lost));
+                attributes.push(("address", &ip[..]));
+                output_string.push_str(&ping_packet_loss.render_sample(Some(&attributes), result.lost));
             }
 
             Ok(output_string)
         }
     });
+
+    Ok(())
 }

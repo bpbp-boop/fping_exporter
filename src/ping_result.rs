@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 use lazy_static::lazy_static;
@@ -130,4 +130,37 @@ impl FromStr for PingResult {
             maxiumum,
         })
     }
+}
+
+#[test]
+fn test_no_loss() {
+    let input = "1.1.1.1 : xmt/rcv/%loss = 2/2/0%, min/avg/max = 0.70/0.90/1.10";
+    let result: PingResult = input.parse().unwrap();
+
+    assert_eq!(result.ip_address, Ipv4Addr::new(1, 1, 1, 1));
+
+    assert_eq!(result.sent, 2);
+    assert_eq!(result.received, 2);
+    assert_eq!(result.lost, 0);
+
+    // how do I compare floats
+    assert!(result.minimum.is_some());
+    assert!(result.average.is_some());
+    assert!(result.maxiumum.is_some());
+}
+
+#[test]
+fn test_loss() {
+    let input = "202.12.11.1 : xmt/rcv/%loss = 2/0/100%";
+    let result: PingResult = input.parse().unwrap();
+
+    assert_eq!(result.ip_address, Ipv4Addr::new(202, 12, 11, 1));
+
+    assert_eq!(result.sent, 2);
+    assert_eq!(result.received, 0);
+    assert_eq!(result.lost, 100);
+
+    assert!(result.minimum.is_none());
+    assert!(result.average.is_none());
+    assert!(result.maxiumum.is_none());
 }

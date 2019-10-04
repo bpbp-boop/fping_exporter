@@ -8,10 +8,10 @@ use structopt::StructOpt;
 
 use ipnet::IpNet;
 
-use snafu::{ResultExt, Snafu};
 use percent_encoding::percent_decode_str;
+use snafu::{ResultExt, Snafu};
 
-use ping_result::{PingResult, FpingParseError};
+use ping_result::{FpingParseError, PingResult};
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "fping_exporter")]
@@ -19,14 +19,13 @@ struct Opt {
     /// Address to listen on for web interface and telemetry.
     #[structopt(long = "listen-address", default_value = "0.0.0.0:9215")]
     web_listen_addr: String,
-
     // #[structopt(long = "targets")]
     // targets: Vec<IpNet>,
 }
 
 #[derive(Debug, Snafu)]
 enum ExporterError {
-     #[snafu(display("Error running fping"))]
+    #[snafu(display("Error running fping"))]
     RunCommand { source: std::io::Error },
 
     #[snafu(display("Error running fping"))]
@@ -71,7 +70,8 @@ fn main() -> Result<()> {
 
             let mut query_string = HashMap::new();
             if request.uri().query().is_some() {
-                let query_decoded = percent_decode_str(request.uri().query().unwrap()).decode_utf8_lossy();
+                let query_decoded =
+                    percent_decode_str(request.uri().query().unwrap()).decode_utf8_lossy();
                 let pairs = query_decoded.split("&");
                 for p in pairs {
                     let mut sp = p.splitn(2, '=');
@@ -105,55 +105,71 @@ fn main() -> Result<()> {
                 let mut attributes = Vec::new();
                 attributes.push(("address", &ip[..]));
                 attributes.push(("sample", "minimum"));
-                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), result.minimum.unwrap()));
+                output_string
+                    .push_str(&ping_rtt.render_sample(Some(&attributes), result.minimum.unwrap()));
 
                 attributes = Vec::new();
                 attributes.push(("address", &ip[..]));
                 attributes.push(("sample", "average"));
-                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), result.average.unwrap()));
+                output_string
+                    .push_str(&ping_rtt.render_sample(Some(&attributes), result.average.unwrap()));
 
                 attributes = Vec::new();
                 attributes.push(("address", &ip[..]));
                 attributes.push(("sample", "maxiumum"));
-                output_string.push_str(&ping_rtt.render_sample(Some(&attributes), result.maxiumum.unwrap()));
+                output_string
+                    .push_str(&ping_rtt.render_sample(Some(&attributes), result.maxiumum.unwrap()));
             }
 
             output_string.push_str("\n\n");
 
             // packets sent/received
-            let ping_packets_sent = PrometheusMetric::new("ping_packets_sent", MetricType::Gauge, "Ping packets sent");
+            let ping_packets_sent =
+                PrometheusMetric::new("ping_packets_sent", MetricType::Gauge, "Ping packets sent");
             output_string.push_str(&ping_packets_sent.render_header());
 
             for result in &subnet_results {
                 let ip = result.ip_address.to_owned().to_string();
                 let mut attributes = Vec::new();
                 attributes.push(("address", &ip[..]));
-                output_string.push_str(&ping_packets_sent.render_sample(Some(&attributes), result.sent));
+                output_string
+                    .push_str(&ping_packets_sent.render_sample(Some(&attributes), result.sent));
             }
 
             output_string.push_str("\n\n");
 
-            let ping_packets_received = PrometheusMetric::new("ping_packets_received", MetricType::Gauge, "Ping packets received");
+            let ping_packets_received = PrometheusMetric::new(
+                "ping_packets_received",
+                MetricType::Gauge,
+                "Ping packets received",
+            );
             output_string.push_str(&ping_packets_received.render_header());
 
             for result in &subnet_results {
                 let ip = result.ip_address.to_owned().to_string();
                 let mut attributes = Vec::new();
                 attributes.push(("address", &ip[..]));
-                output_string.push_str(&ping_packets_received.render_sample(Some(&attributes), result.received));
+                output_string.push_str(
+                    &ping_packets_received.render_sample(Some(&attributes), result.received),
+                );
             }
 
             output_string.push_str("\n\n");
 
             // packets lost as a percentage
-            let ping_packet_loss = PrometheusMetric::new("ping_packet_loss_percent", MetricType::Gauge, "Percent of ping packets lost");
+            let ping_packet_loss = PrometheusMetric::new(
+                "ping_packet_loss_percent",
+                MetricType::Gauge,
+                "Percent of ping packets lost",
+            );
             output_string.push_str(&ping_packet_loss.render_header());
 
             for result in &subnet_results {
                 let ip = result.ip_address.to_owned().to_string();
                 let mut attributes = Vec::new();
                 attributes.push(("address", &ip[..]));
-                output_string.push_str(&ping_packet_loss.render_sample(Some(&attributes), result.lost));
+                output_string
+                    .push_str(&ping_packet_loss.render_sample(Some(&attributes), result.lost));
             }
 
             Ok(output_string)

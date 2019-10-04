@@ -1,22 +1,22 @@
-use std::str::FromStr;
-use std::net::IpAddr;
 use regex::Regex;
+use std::net::IpAddr;
+use std::str::FromStr;
 
-use snafu::{OptionExt, ResultExt, Snafu};
 use lazy_static::lazy_static;
+use snafu::{OptionExt, ResultExt, Snafu};
 
 lazy_static! {
     static ref FPING_REGEX: Regex = Regex::new(
-    	r"(?P<ip_address>.*) :.*= (?P<sent>\d+)/(?P<received>\d+)/(?P<lost>\d+)%(?:,.*= (?P<min>\d+\.?\d*)/(?P<avg>\d+\.?\d*)/(?P<max>\d+\.?\d*))?"
+        r"(?P<ip_address>.*) :.*= (?P<sent>\d+)/(?P<received>\d+)/(?P<lost>\d+)%(?:,.*= (?P<min>\d+\.?\d*)/(?P<avg>\d+\.?\d*)/(?P<max>\d+\.?\d*))?"
     ).unwrap();
 }
 
 #[derive(Debug, Snafu)]
 pub enum FpingParseError {
-	#[snafu(display("Unable to parse fping output"))]
-	CaptureRegex,
+    #[snafu(display("Unable to parse fping output"))]
+    CaptureRegex,
 
-	#[snafu(display("Unable to find `{}` field in fping output", name))]
+    #[snafu(display("Unable to find `{}` field in fping output", name))]
     MissingField { name: String },
 
     #[snafu(display("Error parsing IP Address: {}", ip_address_output))]
@@ -25,7 +25,7 @@ pub enum FpingParseError {
         source: std::net::AddrParseError,
     },
 
-     #[snafu(display("Unable to parse fping output"))]
+    #[snafu(display("Unable to parse fping output"))]
     ParseIntError { source: std::num::ParseIntError },
 
     #[snafu(display("Unable to parse fping output"))]
@@ -44,7 +44,7 @@ pub struct PingResult {
 }
 
 impl FromStr for PingResult {
-	type Err = FpingParseError;
+    type Err = FpingParseError;
 
     fn from_str(ping_result: &str) -> Result<Self, Self::Err> {
         let caps = FPING_REGEX.captures(&ping_result).unwrap();
@@ -120,7 +120,7 @@ impl FromStr for PingResult {
             maxiumum = Some(max_ms / 1000.0);
         }
 
-       	Ok(PingResult {
+        Ok(PingResult {
             ip_address,
             sent,
             received,

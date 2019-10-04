@@ -1,15 +1,17 @@
+mod ping_result;
+
 use prometheus_exporter_base::{render_prometheus, MetricType, PrometheusMetric};
-use regex::Regex;
 use std::process::Command;
 
 use hashbrown::HashMap;
 use structopt::StructOpt;
 
 use ipnet::IpNet;
-use std::net::IpAddr;
 
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 use percent_encoding::percent_decode_str;
+
+use ping_result::{PingResult, FpingParseError};
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "fping_exporter")]
@@ -22,39 +24,13 @@ struct Opt {
     // targets: Vec<IpNet>,
 }
 
-#[derive(Debug)]
-struct PingResult {
-    ip_address: IpAddr,
-    sent: u8,
-    received: u8,
-    lost: u8,
-    minimum: Option<f64>,
-    average: Option<f64>,
-    maxiumum: Option<f64>,
-}
-
 #[derive(Debug, Snafu)]
 enum ExporterError {
-    #[snafu(display("Unable to parse fping output"))]
-    ParseError,
-
-    #[snafu(display("Unable to find `{}` field in fping output", name))]
-    MissingField { name: String },
+     #[snafu(display("Error running fping"))]
+    RunCommand { source: std::io::Error },
 
     #[snafu(display("Error running fping"))]
-    CommandError { source: std::io::Error },
-
-    #[snafu(display("Error parsing IP Address: {}", ip_address_output))]
-    IpAddressError {
-        ip_address_output: String,
-        source: std::net::AddrParseError,
-    },
-
-    #[snafu(display("Unable to parse fping output"))]
-    ParseIntError { source: std::num::ParseIntError },
-
-    #[snafu(display("Unable to parse fping output"))]
-    ParseFloatError { source: std::num::ParseFloatError },
+    Parse { source: FpingParseError },
 }
 
 type Result<T, E = ExporterError> = std::result::Result<T, E>;
@@ -64,97 +40,16 @@ fn process_subnet(target_subnet: IpNet) -> Result<Vec<PingResult>> {
     let output = Command::new("/usr/local/sbin/fping")
         .args(&["-q", "-r", "0", "-c", "5", "-g", &subnet_string])
         .output()
-        .context(CommandError)?;
+        .context(RunCommand)?;
 
     let stderr = output.clone().stderr;
     let output = String::from_utf8_lossy(&stderr);
 
     let mut results = vec![];
 
-    let re = Regex::new(r"(?P<ip_address>.*) :.*= (?P<sent>\d+)/(?P<received>\d+)/(?P<lost>\d+)%(?:,.*= (?P<min>\d+\.?\d*)/(?P<avg>\d+\.?\d*)/(?P<max>\d+\.?\d*))?").unwrap();
-    for ping_result in output.lines() {
-        let caps = re.captures(&ping_result).ok_or(ExporterError::ParseError)?;
-
-        let ip_address_output = caps
-            .name("ip_address")
-            .context(MissingField {
-                name: "ip_address".to_string(),
-            })?
-            .as_str()
-            .trim();
-
-        let ip_address: IpAddr = ip_address_output
-            .parse()
-            .context(IpAddressError { ip_address_output })?;
-
-        let sent_output = caps
-            .name("sent")
-            .context(MissingField {
-                name: "sent".to_string(),
-            })?
-            .as_str();
-        let sent: u8 = sent_output.parse().context(ParseIntError)?;
-
-        let received_output = caps
-            .name("received")
-            .context(MissingField {
-                name: "received".to_string(),
-            })?
-            .as_str();
-        let received: u8 = received_output.parse().context(ParseIntError)?;
-
-        let lost_output = caps
-            .name("lost")
-            .context(MissingField {
-                name: "lost".to_string(),
-            })?
-            .as_str();
-        let lost: u8 = lost_output.parse().context(ParseIntError)?;
-
-        let mut minimum = None;
-        let mut average = None;
-        let mut maxiumum = None;
-
-        if caps.name("min").is_some() {
-            let min_ms: f64 = caps
-                .name("min")
-                .context(MissingField {
-                    name: "min".to_string(),
-                })?
-                .as_str()
-                .parse()
-                .context(ParseFloatError)?;
-            let avg_ms: f64 = caps
-                .name("avg")
-                .context(MissingField {
-                    name: "avg".to_string(),
-                })?
-                .as_str()
-                .parse()
-                .context(ParseFloatError)?;
-            let max_ms: f64 = caps
-                .name("max")
-                .context(MissingField {
-                    name: "max".to_string(),
-                })?
-                .as_str()
-                .parse()
-                .context(ParseFloatError)?;
-
-            minimum = Some(min_ms / 1000.0);
-            average = Some(avg_ms / 1000.0);
-            maxiumum = Some(max_ms / 1000.0);
-        }
-
-        results.push(PingResult {
-            ip_address,
-            sent,
-            received,
-            lost,
-            minimum,
-            average,
-            maxiumum,
-        })
+    for result in output.lines() {
+        let ping_result: PingResult = result.parse().context(Parse)?;
+        results.push(ping_result)
     }
 
     Ok(results)

@@ -1,24 +1,19 @@
 # fping exporter
 
 ### About
-A small rust wrapper around fping designed for monitoring subnets
+Prometheus exporter to run fping against multiple subnets. Tested again 150+ /24s
+Each subnet specified will be run in a background thread
+* each thread is offset from starting by a random number of seconds to avoid flooding the network
+* each subnet will be pinged once every 60 seconds
 
-### Prometheus Configuration
 
+note: adjust kernel limits if needed
 ```
-  - job_name: 'fping'
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-        - 1.1.1.1/30
-        - 8.8.8.8/32
-    relabel_configs:
-      - source_labels: [__address__]
-        target_label: __param_target
-      - source_labels: [__param_target]
-        target_label: instance
-      - target_label: __address__
-        replacement: 127.0.0.1:9215  # The fping exporter's real hostname:port.
+file: /proc/sys/net/ipv4/icmp_msgs_per_sec (default 1000)
+variable: net.ipv4.icmp_msgs_per_sec
+
+file: /proc/sys/net/ipv4/icmp_msgs_burst (default 50)
+variable: net.ipv4.icmp_msgs_burst
 ```
 
 ### Example metrics
@@ -32,19 +27,6 @@ ping_rtt_seconds{address="1.1.1.1",sample="maxiumum"} 0.00095
 ping_rtt_seconds{address="1.1.1.2",sample="minimum"} 0.00049
 ping_rtt_seconds{address="1.1.1.2",sample="average"} 0.00068
 ping_rtt_seconds{address="1.1.1.2",sample="maxiumum"} 0.00107
-
-
-# HELP ping_packets_sent Ping packets sent
-# TYPE ping_packets_sent gauge
-ping_packets_sent{address="1.1.1.1"} 5
-ping_packets_sent{address="1.1.1.2"} 5
-
-
-# HELP ping_packets_received Ping packets received
-# TYPE ping_packets_received gauge
-ping_packets_received{address="1.1.1.1"} 5
-ping_packets_received{address="1.1.1.2"} 5
-
 
 # HELP ping_packet_loss_percent Percent of ping packets lost
 # TYPE ping_packet_loss_percent gauge

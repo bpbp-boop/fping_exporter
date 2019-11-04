@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr};
 use std::str::FromStr;
 
 use lazy_static::lazy_static;
@@ -14,7 +14,7 @@ lazy_static! {
 #[derive(Debug, Snafu)]
 pub enum FpingParseError {
     #[snafu(display("Unable to parse fping output"))]
-    CaptureRegex,
+    CaptureRegex { ping_result: String },
 
     #[snafu(display("Unable to find `{}` field in fping output", name))]
     MissingField { name: String },
@@ -47,7 +47,7 @@ impl FromStr for PingResult {
     type Err = FpingParseError;
 
     fn from_str(ping_result: &str) -> Result<Self, Self::Err> {
-        let caps = FPING_REGEX.captures(&ping_result).unwrap();
+        let caps = FPING_REGEX.captures(&ping_result).context(CaptureRegex { ping_result })?;
 
         let ip_address_output = caps
             .name("ip_address")

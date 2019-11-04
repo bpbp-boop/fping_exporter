@@ -4,34 +4,45 @@ mod ping_result;
 extern crate log;
 extern crate simple_logger;
 
-use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
-
 use prometheus_exporter_base::{MetricType, PrometheusMetric};
+
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
+use std::result::Result;
 use std::sync::{Arc};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::result::Result;
 
+use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
+use hashbrown::HashMap;
+use ipnet::IpNet;
+use log::Level;
+use parking_lot::RwLock;
+use ping_result::PingResult;
+use rand::{thread_rng, Rng};
 use serde_derive::Deserialize;
 use structopt::StructOpt;
 use structopt_toml::StructOptToml;
-use ipnet::IpNet;
-use rand::{thread_rng, Rng};
-use ping_result::PingResult;
-use hashbrown::HashMap;
-use parking_lot::RwLock;
 
 #[derive(Debug, Deserialize, StructOpt, StructOptToml)]
 #[serde(default)]
 #[structopt(name = "fping_exporter")]
 struct Opt {
+    /// Activate debug mode
+    #[structopt(short, long)]
+    debug: bool,
+
     /// Address to listen on for web interface and telemetry.
-    #[structopt(long = "listen-address", default_value = "0.0.0.0:9215")]
+    #[structopt(short= "l", long = "listen-address", default_value = "0.0.0.0:9215")]
     web_listen_addr: String,
 
-    #[structopt(long = "targets")]
+    /// optional path to .toml file containing options and targets
+    #[structopt(short, long = "config-path", parse(from_os_str), default_value = "/etc/fping_exporter/fping_exporter.toml")]
+    config_path: PathBuf,
+
+    /// IP subnets
+    #[structopt(short, long)]
     targets: Vec<IpNet>,
 }
 
@@ -139,11 +150,30 @@ fn metrics(result_store: web::Data<ResultStore>) -> impl Responder {
 }
 
 fn main() {
-    simple_logger::init().unwrap();
+    // load from arguments first, required for getting the config file path
+    let mut options = Opt::from_args();
+    if options.debug {
+        simple_logger::init_with_level(Level::Debug).unwrap();
+    } else {
+        simple_logger::init_with_level(Level::Info).unwrap();
+    }
 
-    let file_contents = fs::read_to_string("fping_exporter.toml")
-        .expect("Something went wrong reading the file");
-    let options = Opt::from_args_with_toml(&file_contents).expect("toml parse failed");
+    // if the file exists, load options from the file now
+    if options.config_path.as_path().exists() {
+        let file_contents = fs::read_to_string(options.config_path).unwrap();
+        match Opt::from_args_with_toml(&file_contents) {
+            Ok(config_file_options) => options = config_file_options,
+            Err(error) => {
+                error!("error parsing config file: {}", error);
+                ::std::process::exit(4);
+            }
+        }
+    }
+
+    if options.targets.is_empty() {
+        info!("no targets specified, exiting");
+        ::std::process::exit(4);
+    }
 
     let results = Arc::new(RwLock::new(HashMap::new()));
     let result_store = web::Data::new(ResultStore {
